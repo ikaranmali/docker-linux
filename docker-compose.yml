@@ -1,0 +1,186 @@
+version: "2"
+
+networks:
+    ndc_net:
+      driver: bridge
+      ipam:
+       config:
+         - subnet: 172.16.0.0/24
+           gateway: 172.16.0.1
+
+volumes:
+  influx_vol:
+    external: true
+  ndc_data_vol:
+    external: true
+  chrono_vol:
+    external: true
+  influx_conf:
+    external : true
+  mosquitto_vol:
+    external : true
+
+services:
+  
+  base_image:
+    image: ndc_base_image:0.1
+    container_name: base_image_container
+    build: ndc_container
+
+  influxdb:
+    image: influxdb:1.7.1
+    container_name: influxdb
+    restart: unless-stopped
+    volumes:
+      - influx_vol:/var/lib/influxdb
+      - influx_conf:/etc/influxdb/
+    # network_mode: "host"
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.10
+    ports: [8086]
+
+  modbus-simulator:
+    image: ndc_base_image:0.1
+    container_name : modbus_simulator
+    depends_on:
+      - influxdb
+    volumes:
+     - ndc_data_vol:/home/
+    restart: unless-stopped
+    command : python3 -u modbus_simulator.py --conf conf_nplc.json
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.20
+    ports: [502]
+    # network_mode: "host"
+
+  influx-QL:
+    image: ndc_base_image:0.1
+    container_name : influx_QL_setup
+    depends_on:
+      - influxdb
+    volumes:
+     - ndc_data_vol:/home/
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.21
+    ports: [8086]
+    command: sh -c "./QL_setup.sh"
+    restart: on-failure
+    # network_mode: "host"
+
+
+  chronograf:
+    image: chronograf
+    container_name: chronogarf
+    restart: always
+    ports: [8888,8086]
+    # network_mode: "host"
+    
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.22
+
+  modbus-nplc:
+    image: ndc_base_image:0.1
+    container_name : modbus_nplc
+    depends_on:
+      - influxdb
+      - modbus-simulator
+    volumes:
+     - ndc_data_vol:/home/
+    restart: unless-stopped
+    # network_mode: "host"
+    command : python3 -u modbus.py --conf modbus_nplc.json --mode tcp
+    ports: [502]
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.23
+
+  rt-calculated:
+    image: ndc_base_image:0.1
+    container_name : rt_calculated
+    depends_on:
+      - influxdb
+    # network_mode: "host"
+    volumes:
+      - ndc_data_vol:/home/
+    restart: unless-stopped
+    command : python3 -u realtime_calculated_tags.py rt_calculated_tags.json 
+    ports: [502]
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.24
+
+  rt-counter:
+    image: ndc_base_image:0.1
+    container_name : rt_counter
+    depends_on:
+      - influxdb
+    # network_mode: "host"
+    volumes:
+      - ndc_data_vol:/home/    
+    restart: unless-stopped
+    command : python3 -u realtime_counters.py rt_counters.json
+    ports: [502]
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.25
+
+  # nmea-5001:
+  #   image: ndc_base_image:0.1
+  #   container_name: nmea_5001
+  #   depends_on:
+  #     - influxdb
+  #   # network_mode: "host"
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ndc_data_vol:/home/    
+  #   command : python3 -u /home/ndc/scripts/NMEA_listener.py /home/ndc/conf/nmea_5001.json
+  #   ports: [5001,8086]
+  #   networks:
+  #     ndc_net:
+  #       ipv4_address: 172.16.0.26
+
+  cron-export:
+    image: ndc_base_image:0.1
+    container_name: cron_export
+    depends_on:
+      - influxdb
+    # network_mode: "host"
+    volumes:
+      - /home/ndc/export:/home/export/
+    restart: unless-stopped
+    command : sh -c "cron -f && smbd --foreground --log-stdout --no-process-group"
+    ports: [445,139]
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.27
+  
+  mqtt-broker:
+    image: eclipse-mosquitto:latest
+    hostname : mqtt_broker
+    restart: unless-stopped
+    # network_mode: "host"
+    volumes : 
+      - mosquitto_vol:/var/lib/mosquitto
+    ports: [1883]
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.29
+  
+  ndc-publisher:
+    image: ndc_base_image:0.1
+    container_name : ndc_publisher
+    depends_on:
+      - mqtt-broker
+    # network_mode: "host"
+    volumes:
+      - ndc_data_vol:/home/    
+    restart: unless-stopped
+    command : python3 -u ndc_publisher.py --conf conf_ndc_publisher_per_min.json
+    ports: [1883]
+    networks:
+      ndc_net:
+        ipv4_address: 172.16.0.30
